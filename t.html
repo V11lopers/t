@@ -1,0 +1,98 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>CSSprobevariant</title>
+<style>
+@font-face {
+  font-family: "fface-variant-descriptor-probe";
+  src: local("DejaVuSans"), local("DejaVu Sans"), local("Arial"), local("Helvetica"), local("Times New Roman"), local("Courier New");
+  unicode-range: U+0042;
+}
+#probe {
+  font-family: "fface-variant-descriptor-probe";
+  position: absolute;
+  left: -10000px;
+  top: -10000px;
+}
+</style>
+</head>
+<body>
+<span id="probe">B</span>
+<pre id="result">running</pre>
+<script>
+(function () {
+    "use strict";
+
+    if (window.testRunner) {
+        testRunner.dumpAsText();
+        testRunner.waitUntilDone();
+    }
+
+    const family = "fface-variant-descriptor-probe";
+    const resultElement = document.getElementById("result");
+    const lines = [];
+    let getterHits = 0;
+    let finished = false;
+
+    function record(message)
+    {
+        lines.push(message);
+        console.log(message);
+    }
+
+    function finish()
+    {
+        if (finished)
+            return;
+        finished = true;
+        resultElement.textContent = lines.join("\n");
+        if (window.testRunner)
+            testRunner.notifyDone();
+    }
+
+    function makeThenGetter()
+    {
+        return function () {
+            ++getterHits;
+            return undefined;
+        };
+    }
+
+    function run()
+    {
+        record("POC STARTED: descriptor probe variant");
+        const jsFace = new FontFace(family, 'local("DejaVuSans"), local("DejaVu Sans"), local("Arial"), local("Helvetica"), local("Times New Roman"), local("Courier New")', { unicodeRange: "U+0041" });
+        Object.defineProperty(jsFace, "then", { configurable: true, get: makeThenGetter() });
+
+        console.log('"then" in jsFace=' + ("then" in jsFace));
+        console.log('own descriptor exists=' + !!Object.getOwnPropertyDescriptor(jsFace, "then"));
+        console.log('prototype descriptor exists=' + !!Object.getOwnPropertyDescriptor(FontFace.prototype, "then"));
+
+        const loadedPromise = jsFace.loaded;
+        if (loadedPromise) {
+            loadedPromise.then(function () { }, function () { });
+        }
+
+        document.fonts.add(jsFace);
+        const checkA = document.fonts.check('16px "' + family + '"', "A");
+        const checkB = document.fonts.check('16px "' + family + '"', "B");
+        const checkAB = document.fonts.check('16px "' + family + '"', "AB");
+        record("document.fonts.check A=" + checkA + " B=" + checkB + " AB=" + checkAB);
+        if (checkA === false && checkB === true && checkAB === false) {
+            record("MATCHED ORIGINAL CRASH STATE A=false B=true AB=false");
+            record("before body.offsetTop");
+            const offset = document.body.offsetTop;
+            record("after body.offsetTop value=" + offset);
+        }
+        record("getter hits=" + getterHits);
+        record("NO CRASH OBSERVED");
+        record("DONE");
+        setTimeout(finish, 0);
+    }
+
+    setTimeout(run, 0);
+})();
+</script>
+</body>
+</html>
